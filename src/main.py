@@ -5,15 +5,67 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.metrics import (
     classification_report, confusion_matrix, accuracy_score,
-    roc_curve, auc, precision_recall_curve, average_precision_score
+    roc_curve, auc, precision_recall_curve, average_precision_score, f1_score
 )
 
-# -------------------- 1. LOAD DATA --------------------
-train_df = pd.read_csv('./datasets/train_ai4i2020.csv')
-test_df  = pd.read_csv('./datasets/test_ai4i2020.csv')
+# -------------------- 0. HELPER: save DataFrame as PNG table --------------------
+def save_table_as_image(df, title, filepath, fontsize=10):
+    """Save a pandas DataFrame as a nicely formatted PNG table."""
+    fig, ax = plt.subplots(figsize=(len(df.columns) * 1.8, len(df) * 0.6 + 1))
+    ax.axis('tight')
+    ax.axis('off')
+    ax.set_title(title, fontsize=fontsize + 2, weight='bold', pad=10)
+
+    table = ax.table(
+        cellText=df.values,
+        colLabels=df.columns,
+        rowLabels=df.index,
+        cellLoc='center',
+        loc='center'
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(fontsize)
+    table.scale(1.2, 1.4)
+
+    plt.savefig(filepath, dpi=150, bbox_inches='tight')
+    plt.close()
+
+# -------------------- 1. LOAD DATA (robust paths) --------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATASETS_DIR = os.path.join(BASE_DIR, 'datasets')
+
+train_path = os.path.join(DATASETS_DIR, 'train_ai4i2020.csv')
+test_path  = os.path.join(DATASETS_DIR, 'test_ai4i2020.csv')
+
+if not os.path.exists(train_path):
+    original_path = os.path.join(DATASETS_DIR, 'ai4i2020.csv')
+    if not os.path.exists(original_path):
+        raise FileNotFoundError(
+            f"Neither {train_path} nor {original_path} found.\n"
+        )
+    # Recreate train/test split
+    df = pd.read_csv(original_path)
+    df['failure'] = (df['Machine failure'] == 1).astype(int)
+    drop_cols = ['UDI', 'Product ID', 'Machine failure', 'TWF', 'HDF', 'PWF', 'OSF', 'RNF']
+    X = df.drop(columns=drop_cols)
+    y = df['failure']
+    X = pd.get_dummies(X, columns=['Type'], drop_first=False)
+    X_tr, X_te, y_tr, y_te = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    train_df = X_tr.copy()
+    train_df['failure'] = y_tr
+    test_df  = X_te.copy()
+    test_df['failure'] = y_te
+    train_df.to_csv(train_path, index=False)
+    test_df.to_csv(test_path, index=False)
+    print("Train/test files regenerated successfully.")
+else:
+    train_df = pd.read_csv(train_path)
+    test_df  = pd.read_csv(test_path)
 
 X_train = train_df.drop('failure', axis=1)
 y_train = train_df['failure']
@@ -29,7 +81,7 @@ rf = RandomForestClassifier(
 )
 rf.fit(X_train, y_train)
 
-# Cross‑validation (optional, but informative)
+# Cross‑validation
 cv_scores = cross_val_score(rf, X_train, y_train, cv=5, scoring='f1')
 print(f"5-fold CV F1-score: {cv_scores.mean():.4f}")
 
@@ -40,12 +92,37 @@ print(f"\nTest Accuracy: {accuracy_score(y_test, y_pred):.4f}")
 print("\nClassification Report:")
 print(classification_report(y_test, y_pred))
 
-# -------------------- 4. GENERATE & SAVE PLOTS --------------------
-FOLDER_NAME = "baseline_model"   # change to "tuned_model" etc. as needed
+# -------------------- 4. OUTPUT DIRECTORY --------------------
+FOLDER_NAME = "baseline_model"
 OUTPUT_DIR = f"./outputs/{FOLDER_NAME}"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 4a. Confusion matrix
+# -------------------- 5. SAVE TABLES AS IMAGES --------------------
+# 5a. Classification report
+report_dict = classification_report(y_test, y_pred, output_dict=True)
+report_df = pd.DataFrame(report_dict).transpose().round(3)
+report_df = report_df.fillna('')   # clean up accuracy row
+save_table_as_image(
+    report_df,
+    title='Classification Report – Test Set',
+    filepath=os.path.join(OUTPUT_DIR, 'classification_report.png'),
+    fontsize=10
+)
+
+# 5b. Cross‑validation score
+cv_df = pd.DataFrame({
+    'Mean F1': [round(cv_scores.mean(), 4)],
+    'Std F1':  [round(cv_scores.std(), 4)]
+}, index=['5-fold CV'])
+save_table_as_image(
+    cv_df,
+    title='Cross‑Validation Result',
+    filepath=os.path.join(OUTPUT_DIR, 'cv_score.png'),
+    fontsize=10
+)
+
+# -------------------- 6. GENERATE & SAVE PLOTS --------------------
+# 6a. Confusion matrix
 cm = confusion_matrix(y_test, y_pred)
 plt.figure(figsize=(5, 4))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
@@ -58,7 +135,7 @@ plt.tight_layout()
 plt.savefig(os.path.join(OUTPUT_DIR, 'confusion_matrix.png'), dpi=150)
 plt.close()
 
-# 4b. Feature importance
+# 6b. Feature importance
 importances = rf.feature_importances_
 indices = np.argsort(importances)[::-1]
 features = X_train.columns
@@ -71,9 +148,8 @@ plt.tight_layout()
 plt.savefig(os.path.join(OUTPUT_DIR, 'feature_importance.png'), dpi=150)
 plt.close()
 
-# 4c. ROC & AUC (needs predicted probabilities)
+# 6c. ROC & AUC
 y_score = rf.predict_proba(X_test)[:, 1]
-
 fpr, tpr, _ = roc_curve(y_test, y_score)
 roc_auc = auc(fpr, tpr)
 
@@ -90,7 +166,7 @@ plt.tight_layout()
 plt.savefig(os.path.join(OUTPUT_DIR, 'roc_curve.png'), dpi=150)
 plt.close()
 
-# 4d. Precision‑Recall curve
+# 6d. Precision‑Recall curve
 precision, recall, _ = precision_recall_curve(y_test, y_score)
 avg_precision = average_precision_score(y_test, y_score)
 
@@ -104,4 +180,44 @@ plt.tight_layout()
 plt.savefig(os.path.join(OUTPUT_DIR, 'pr_curve.png'), dpi=150)
 plt.close()
 
-print(f"\nAll plots saved in {OUTPUT_DIR}")
+# -------------------- 7. (Optional) PARAMETER SENSITIVITY --------------------
+# Uncomment the block below to generate a parameter effect table & plot
+"""
+param_name = 'n_estimators'
+param_values = [10, 50, 100, 200, 500]
+f1_list = []
+
+for v in param_values:
+    rf_temp = RandomForestClassifier(
+        n_estimators=v, class_weight='balanced',
+        random_state=42, n_jobs=-1
+    )
+    rf_temp.fit(X_train, y_train)
+    y_pred_temp = rf_temp.predict(X_test)
+    f1_list.append(f1_score(y_test, y_pred_temp))
+
+# Table
+param_df = pd.DataFrame({'n_estimators': param_values, 'F1-score': f1_list})
+param_df.set_index('n_estimators', inplace=True)
+print("\nEffect of n_estimators on F1-score:")
+print(param_df)
+
+save_table_as_image(
+    param_df,
+    title='Effect of n_estimators on F1-score',
+    filepath=os.path.join(OUTPUT_DIR, 'param_effect.png'),
+    fontsize=10
+)
+
+# Plot
+plt.figure()
+plt.plot(param_values, f1_list, marker='o')
+plt.xlabel('n_estimators')
+plt.ylabel('F1-score (Failure class)')
+plt.title('Sensitivity to Number of Trees')
+plt.grid(True)
+plt.savefig(os.path.join(OUTPUT_DIR, 'param_effect_plot.png'), dpi=150)
+plt.close()
+"""
+
+print(f"\nAll outputs saved in {OUTPUT_DIR}")
